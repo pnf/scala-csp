@@ -28,9 +28,6 @@ package core_async {
     }
   }
   
-  
-
-
   object OfferResult extends Enumeration {
     type OfferResult = Value
     val AlreadyCompleted,    // The promise had already been completed by someone else 
@@ -56,9 +53,18 @@ package core_async {
       }
       else AlreadyCompleted
      }
+    override def finalize {
+      TentativePromise.adj(-1)
+    } 
    }
    object TentativePromise {
-    def apply[T] = new TentativePromise[T]
+    var n = 0
+    def count = this.synchronized {n} 
+    def adj(i:Int) = this.synchronized {n = n + i}
+    def apply[T] = {
+      adj(1)
+      new TentativePromise[T]
+    }
    }
   
 
@@ -90,10 +96,19 @@ package core_async {
         pDeliver.future.map {_ => this.synchronized{h -= pDeliver}}
       }
     }
+    override def finalize {
+      IndirectPromise.adj(-1)
+    }
   }
 
   object IndirectPromise {
-    def apply[T,U] = new IndirectPromise[T,U]()
+    var n = 0
+    def count = this.synchronized{n}
+    def adj(i:Int) {this.synchronized {n = n + i}}
+    def apply[T,U] = {
+      adj(1)
+      new IndirectPromise[T,U]() 
+    }
     def successful[T,U](u:U) : IndirectPromise[T,U] = {
       val p = new IndirectPromise[T,U]()
       p.trySuccess(u)
@@ -237,6 +252,7 @@ package core_async {
       pReadyForWrite.futureOffer(p)(tryWrite(v,_))
       p.future.map(_ => Unit)
     }
+    def <-- (v: T)= write(v)
 
     def read: Future[T] = this.synchronized {
       val p = TentativePromise[CV[T]]
@@ -260,6 +276,9 @@ package core_async {
 
   import java.util.UUID
   object Chan extends LazyLogging {
+    
+    def unary_~[T](c: Chan[T]) = c.read
+    
     def apply[T](name: String) = new Chan[T](new NormalBuffer(1, false, false), name)
     def apply[T] = new Chan[T](new NormalBuffer(1, false, false), UUID.randomUUID().toString())
     def apply[T](n: Int) = new Chan[T](new NormalBuffer(n, false, false), UUID.randomUUID.toString())
@@ -291,86 +310,4 @@ package core_async {
   }
 }
 
-import core_async._
 
-object AsyncTest extends App {
-
-  import Chan._
-  import scala.util.Random
-  
-
-  val f = Future {Thread.sleep(100);2}
-  val f2 = f.map {_+1}
-  val f3 = Future {Thread.sleep(1000); 3.14}
-  val f4 = async {await(f3).round == await(f2)}
-  async {
-    println(s"Flort ${await(f4)}")
-  }
-  
-
-  val cListen = Chan[Int]
-  val cRespond = Chan[Int]
-
-  async {
-    while (true) {
-      println("Waiting")
-      val i = await(cListen.read)
-      println(s"Got $i")
-      cRespond.write(i + 1)
-    }
-  }
-
-  async {
-    println("Sending 3")
-    await(cListen.write(3))
-    println("Sent")
-    val i = await(cRespond.read)
-    println(s"Got $i")
-  }
-
-  {
-    
-    val c1 = Chan[Int]
-    val c2 = Chan[String]
-  
-  async {
-      while(true) {
-        val i = Random.nextInt(10)
-        println(s"Sending $i") 
-        await{c1.write(i)}
-        println(s"Sent $i") 
-        await{timeout((Random.nextInt(1000)) milliseconds).read}
-        println("About to send another integer")
-      }
-  }
-
-  async {
-      while(true) {
-        val s = s"I am a string: ${Random.nextInt(10)}"
-        println(s"Sending $s")
-        await{c2.write(s)}
-        println(s"Sent $s")
-        await{timeout((Random.nextInt(1000)) milliseconds).read}
-        println("About to send another string")
-      }
-  }
-
-    var n = 100
-    async {
-      while(n>0) {
-        n=n-1
-        println("Running alts")
-        await(Chan.alts(c1, c2)) match {
-          case c1(i) => println(s"Plus one is ${i + 1}")
-          case c2(s) => println(s + " flushing")
-        }
-      }
-    }
-
-  }
-  
-  
-
-  Await.ready(Promise[Unit].future, Duration.Inf)
-
-}
