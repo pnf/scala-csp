@@ -28,49 +28,43 @@ package core_async {
     }
   }
   
-  object OfferResult extends Enumeration {
-    type OfferResult = Value
-    val AlreadyCompleted,    // The promise had already been completed by someone else 
-        DidComplete,         // Our offer succeeded; we completed the promise.
-        DidNotComplete =     // Our offer failed; promise is still uncompleted.
+  object TentativeOfferResult extends Enumeration {
+    type TentativeOfferResult = Value
+    val Refused,    // The promise had already been completed by someone else 
+        Accepted,   // Our offer succeeded; we completed the promise.
+        Retracted = // Our offer failed; promise is still uncompleted.
           Value
   }
-  import OfferResult._
+  import TentativeOfferResult._
   
   /** Promise that might not be fulfilled.
     */
   class TentativePromise[T] {
     val p = Promise[T]
     def future: scala.concurrent.Future[T] = p.future
-    /** Only evaluate the lazy offer if the promise is incomplete.
-     *  Only complete the promise if the offer returns Some
-     *  Returns tuple of (already completed, 
+    /** A normal Promise.tryComplete might fail if the promise is already completed; this
+     *  one can also fail because the lazy offer value returns None.
+     *  The result is a TentativeOfferResult
      */
-    def tentativeOffer(o: => Option[T]) :  OfferResult = this.synchronized {
-      if(!p.isCompleted) o match {
-        case Some(t) => {p.success(t); DidComplete}
-        case None    => DidNotComplete
+    def tryComplete(o: => Option[T]):  TentativeOfferResult = this.synchronized {
+      if(!p.isCompleted)  o match {
+        case Some(t) =>
+          p.success(t)
+          Accepted
+        case None =>
+          Retracted
       }
-      else AlreadyCompleted
+      else Refused
      }
-    override def finalize {
-      TentativePromise.adj(-1)
-    } 
    }
    object TentativePromise {
-    var n = 0
-    def count = this.synchronized {n} 
-    def adj(i:Int) = this.synchronized {n = n + i}
-    def apply[T] = {
-      adj(1)
-      new TentativePromise[T]
-    }
+    def apply[T] =    new TentativePromise[T]
    }
   
 
   /** Promise that fulfills tentative promises.
    */
-  class IndirectPromise[T,U] extends Promise[U] {
+  class ReadyPromise[T,U] extends Promise[U] {
     type TP = TentativePromise[T]
 	  val p = Promise[U]
 		val h: scala.collection.mutable.HashMap[TP, TP => Unit] = new scala.collection.mutable.HashMap()
@@ -79,38 +73,33 @@ package core_async {
     def isCompleted: Boolean = p.isCompleted
     
     def tryComplete(result: scala.util.Try[U]): Boolean = this.synchronized {
-       if(p.tryComplete(result)) {  // fires any standard listeners
-          h.foreach {case (pDeliver,f) => f(pDeliver) }
+       val ret = if(p.tryComplete(result)) {  // fires any standard listeners
+          // Notify all clients.  
+          h.foreach {case (pDeliver,deliverTo) => deliverTo(pDeliver) }
           true
-       } else false}
+       } else false
+       h.clear()
+       ret
+    }
 
     /** 
-     * When this IndirectPromise is complete, attempt to complete
+     * When this ReadyPromise is complete, attempt to complete
      * the TentativePromise pDeliver by passing it to f.
      */
-    def futureOffer(pDeliver : TP)(f:TP=>Unit) : Unit = this.synchronized {
+    def tryDeliver(recipient : TP)(deliverTo:TP=>Unit): Unit = this.synchronized {
       if(p.isCompleted) {
-        f(pDeliver)
+        deliverTo(recipient)
       } else {
-        h += ((pDeliver, f))
-        pDeliver.future.map {_ => this.synchronized{h -= pDeliver}}
+        h += ((recipient, deliverTo))
+        recipient.future.map {_ => this.synchronized{h -= recipient}}
       }
-    }
-    override def finalize {
-      IndirectPromise.adj(-1)
     }
   }
 
-  object IndirectPromise {
-    var n = 0
-    def count = this.synchronized{n}
-    def adj(i:Int) {this.synchronized {n = n + i}}
-    def apply[T,U] = {
-      adj(1)
-      new IndirectPromise[T,U]() 
-    }
-    def successful[T,U](u:U) : IndirectPromise[T,U] = {
-      val p = new IndirectPromise[T,U]()
+  object ReadyPromise {
+    def apply[T,U] =         new ReadyPromise[T,U]() 
+    def successful[T,U](u:U) : ReadyPromise[T,U] = {
+      val p = new ReadyPromise[T,U]()
       p.trySuccess(u)
       p
     }
@@ -194,8 +183,8 @@ package core_async {
     
     def chan = this
 
-    private [this] var pReadyForWrite =   IndirectPromise.successful[CV[T],Unit](Unit)
-    private [this ] var pReadyForRead =   IndirectPromise[CV[T],Unit]
+    private [this] var pReadyForWrite =   ReadyPromise.successful[CV[T],Unit](Unit)
+    private [this ] var pReadyForRead =   ReadyPromise[CV[T],Unit]
     
 
 
@@ -213,30 +202,30 @@ package core_async {
     private[this] def tryWrite(v: T, pClient: TentativePromise[CV[T]]) : Unit = this.synchronized {
       logger.debug(s"tryWrite $this $v $pClient")
       var trigger = false
-      pClient.tentativeOffer(b.put(v).map { br => 
+      pClient.tryComplete(b.put(v).map { br => 
                                              if (br.noLongerEmpty) {logger.debug(s"${this} nle $v"); trigger = true}
-                                             if (br.nowFull)       {logger.debug(s"${this} nf $v");  pReadyForWrite = IndirectPromise[CV[T],Unit]}
+                                             if (br.nowFull)       {logger.debug(s"${this} nf $v");  pReadyForWrite = ReadyPromise[CV[T],Unit]}
                                              CV(this,v)
                                            }) match {
-        case DidNotComplete => {logger.debug(s"${this} wdnc $v"); pReadyForWrite.futureOffer(pClient){tryWrite(v,_)}}
-        case DidComplete => {logger.debug(s"${this} wdc $v")}
-        case AlreadyCompleted => {logger.debug(s"${this} ac $v")}
+        case Retracted => {logger.debug(s"${this} wdnc $v"); pReadyForWrite.tryDeliver(pClient){tryWrite(v,_)}}
+        case Accepted => {logger.debug(s"${this} wdc $v")}
+        case Refused => {logger.debug(s"${this} ac $v")}
       }
       if(trigger) pReadyForRead.trySuccess(Unit)
     }
 
 
-      private[this] def tryRead(pNotify: TentativePromise[CV[T]]): Unit = this.synchronized {
-        logger.debug(s"tryRead $this $pNotify")
+      private[this] def tryRead(pClient: TentativePromise[CV[T]]): Unit = this.synchronized {
+        logger.debug(s"tryRead $this $pClient")
         var trigger = false
-        pNotify.tentativeOffer(b.take.map {br =>
+        pClient.tryComplete(b.take.map {br =>
           if(br.noLongerFull) {logger.debug(s"${this} nlf ${br.v}"); trigger = true}
-          if(br.nowEmpty)     {logger.debug(s"${this} ne ${br.v}");  pReadyForRead = IndirectPromise[CV[T],Unit]}
+          if(br.nowEmpty)     {logger.debug(s"${this} ne ${br.v}");  pReadyForRead = ReadyPromise[CV[T],Unit]}
           CV(this,br.v)
         }) match {
-          case DidNotComplete => {logger.debug(s"${this} dnc");pReadyForRead.future map {_ => tryRead(pNotify)}}
-          case DidComplete           => logger.debug(s"${this} rdc");
-          case AlreadyCompleted      => logger.debug(s"${this} rac");
+          case Retracted => {logger.debug(s"${this} dnc");pReadyForRead.future map {_ => tryRead(pClient)}}
+          case Accepted           => logger.debug(s"${this} rdc");
+          case Refused      => logger.debug(s"${this} rac");
         }
         if(trigger) pReadyForWrite.trySuccess(Unit)
       }
@@ -249,7 +238,7 @@ package core_async {
     def write(v: T): Future[Unit] = this.synchronized {
       val p = TentativePromise[CV[T]]
       logger.debug(s"$this write $v $p")
-      pReadyForWrite.futureOffer(p)(tryWrite(v,_))
+      pReadyForWrite.tryDeliver(p)(tryWrite(v,_))
       p.future.map(_ => Unit)
     }
     def <-- (v: T)= write(v)
@@ -257,18 +246,18 @@ package core_async {
     def read: Future[T] = this.synchronized {
       val p = TentativePromise[CV[T]]
       logger.debug(s"$this read $p")
-      pReadyForRead.futureOffer(p)(tryRead(_))
+      pReadyForRead.tryDeliver(p)(tryRead(_))
       p.future.map(_.v)
     }
 
     
     def read(pNotify: TentativePromise[CV[T]]): Unit = this.synchronized {
       logger.debug(s"$this read $pNotify")
-     pReadyForRead.futureOffer(pNotify)(tryRead(_))}
+     pReadyForRead.tryDeliver(pNotify)(tryRead(_))}
 
     def write(v: T, pNotify: TentativePromise[CV[T]] ) : Unit = this.synchronized {
       logger.debug(s"$this write $pNotify")
-      pReadyForWrite.futureOffer(pNotify)(tryWrite(v,_))}
+      pReadyForWrite.tryDeliver(pNotify)(tryWrite(v,_))}
       
   }
 
