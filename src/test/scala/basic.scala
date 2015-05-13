@@ -29,11 +29,12 @@ class SendAndReceive extends FlatSpec with TimeLimitedTests {
 
 
 
-object AsyncTest extends App {
+object AsyncApp extends App {
 
   import Chan._
   import scala.util.Random
   
+/*
 
   val f = Future {Thread.sleep(100);2}
   val f2 = f.map {_+1}
@@ -44,9 +45,8 @@ object AsyncTest extends App {
   }
   
 
-  val cListen = Chan[Int]
-  val cRespond = Chan[Int]
-
+  val cListen = Chan[Int]("c1")
+  val cRespond = Chan[Int]("c2")
   async {
     while (true) {
       println("Waiting")
@@ -63,11 +63,12 @@ object AsyncTest extends App {
     val i = await(cRespond.read)
     println(s"Got $i")
   }
-
+*/
   {
     
-    val c1 = Chan[Int]
-    val c2 = Chan[String]
+    val c1 = Chan[Int]("c1")
+    val c2 = Chan[String]("c2")
+    
   
   async {
       while(true) {
@@ -75,7 +76,7 @@ object AsyncTest extends App {
         println(s"Sending $i") 
         await{c1.write(i)}
         println(s"Sent $i") 
-        await{timeout((Random.nextInt(1000)) milliseconds).read}
+        await{timeout((Random.nextInt(1000)) milliseconds,"timeout1").read}
         println("About to send another integer")
       }
   }
@@ -86,16 +87,16 @@ object AsyncTest extends App {
         println(s"Sending $s")
         await{c2.write(s)}
         println(s"Sent $s")
-        await{timeout((Random.nextInt(1000)) milliseconds).read}
+        await{timeout((Random.nextInt(1000)) milliseconds,"timeout2").read}
         println("About to send another string")
       }
-  }
-
+    }
+  
     var n = 100
     async {
       while(n>0) {
         n=n-1
-        println(s"Running alts ${IndirectPromise.count} ${TentativePromise.count}")
+        println("Running alts")
         await(Chan.alts(c1, c2)) match {
           case c1(i) => println(s"Plus one is ${i + 1}")
           case c2(s) => println(s + " flushing")
@@ -105,8 +106,8 @@ object AsyncTest extends App {
 
   }
   
+ 
   
-
   Await.ready(Promise[Unit].future, Duration.Inf)
 
 }

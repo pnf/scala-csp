@@ -30,9 +30,9 @@ package core_async {
   
   object TentativeOfferResult extends Enumeration {
     type TentativeOfferResult = Value
-    val Refused,    // The promise had already been completed by someone else 
-        Accepted,   // Our offer succeeded; we completed the promise.
-        Retracted = // Our offer failed; promise is still uncompleted.
+    val Retracted,    // The promise had already been completed by someone else 
+        Accepted,     // Our offer succeeded; we completed the promise.
+        Refused =     // Our offer failed; promise is still uncompleted.
           Value
   }
   import TentativeOfferResult._
@@ -52,9 +52,9 @@ package core_async {
           p.success(t)
           Accepted
         case None =>
-          Retracted
+          Refused
       }
-      else Refused
+      else Retracted
      }
    }
    object TentativePromise {
@@ -74,7 +74,7 @@ package core_async {
     
     def tryComplete(result: scala.util.Try[U]): Boolean = this.synchronized {
        val ret = if(p.tryComplete(result)) {  // fires any standard listeners
-          // Notify all clients.  
+          // Notify all clients.  Some of the deliveries might fail.
           h.foreach {case (pDeliver,deliverTo) => deliverTo(pDeliver) }
           true
        } else false
@@ -105,7 +105,7 @@ package core_async {
     }
   }
   
-  case class BufferResult[T](v : T,
+  case class BufferSuccess[T](v : T,
         noLongerEmpty:Boolean=false,
         noLongerFull:Boolean=false,
         nowEmpty:Boolean=false,
@@ -115,8 +115,8 @@ package core_async {
   // The only thing exciting about a ChanBuffer is that you pass its put/take methods
   // a promise to fulfill should that operation render the buffer no longer empty/full.
   abstract class ChanBuffer[T]() {
-    def put(v: T) : Option[BufferResult[T]]
-    def take : Option[BufferResult[T]]
+    def put(v: T) : Option[BufferSuccess[T]]
+    def take : Option[BufferSuccess[T]]
   }
   
 
@@ -126,7 +126,7 @@ package core_async {
     
     override def toString = s"NormalBuffer($n, $dropping, $sliding, $b"
     
-    def put(v:T) : Option[BufferResult[T]] = this.synchronized {
+    def put(v:T) : Option[BufferSuccess[T]] = this.synchronized {
       val s = b.size
       var noLongerEmpty = false
       var nowFull = false
@@ -150,10 +150,10 @@ package core_async {
         b += v
         noLongerEmpty=true
       }
-      Some(BufferResult(v,noLongerEmpty=noLongerEmpty,nowFull=nowFull))
+      Some(BufferSuccess(v,noLongerEmpty=noLongerEmpty,nowFull=nowFull))
     }
 
-    def take : Option[BufferResult[T]]= this.synchronized {
+    def take : Option[BufferSuccess[T]]= this.synchronized {
       val s = b.size
       var noLongerFull = false
       var nowEmpty = false
@@ -162,7 +162,7 @@ package core_async {
           noLongerFull = true
           if (s == 1) { nowEmpty=true}
         }
-        Some(BufferResult(b.remove(0),nowEmpty=nowEmpty,noLongerFull=noLongerFull))
+        Some(BufferSuccess(b.remove(0),nowEmpty=nowEmpty,noLongerFull=noLongerFull))
       } else {
         None
       }
@@ -198,36 +198,48 @@ package core_async {
       } else None
 
 
-    // Only reschedule if we failed to write to the buffer, not if the promise was already completed.
-    private[this] def tryWrite(v: T, pClient: TentativePromise[CV[T]]) : Unit = this.synchronized {
-      logger.debug(s"tryWrite $this $v $pClient")
-      var trigger = false
-      pClient.tryComplete(b.put(v).map { br => 
-                                             if (br.noLongerEmpty) {logger.debug(s"${this} nle $v"); trigger = true}
-                                             if (br.nowFull)       {logger.debug(s"${this} nf $v");  pReadyForWrite = ReadyPromise[CV[T],Unit]}
-                                             CV(this,v)
-                                           }) match {
-        case Retracted => {logger.debug(s"${this} wdnc $v"); pReadyForWrite.tryDeliver(pClient){tryWrite(v,_)}}
-        case Accepted => {logger.debug(s"${this} wdc $v")}
-        case Refused => {logger.debug(s"${this} ac $v")}
+      // Only reschedule if we failed to write to the buffer, not if the promise was already completed.
+      private[this] def tryWrite(v: T, pClient: TentativePromise[CV[T]]) : Unit = this.synchronized {
+    	  logger.debug(s"tryWrite $this $v $pClient")
+    	  def processPutResult(br: BufferSuccess[T]) : CV[T] = {
+          if (br.nowFull)  pReadyForWrite = ReadyPromise[CV[T],Unit]
+    		  if (br.noLongerEmpty) pReadyForRead.trySuccess(Unit)
+          logger.debug(s"tryWrite ${this} $br")
+    		  CV(this,v)
+    	  }
+    	  pClient.tryComplete(b.put(v).map(processPutResult)) match {
+      	  case Refused =>
+        	  // i.e. someone wrote before we could, and now the buffer is full; reschedule.
+        	  logger.debug(s"tryWrite ${this} refused $v}")
+    	      pReadyForWrite.tryDeliver(pClient)(tryWrite(v,_))
+    	    case Accepted =>
+            // it worked; no need to reschedule
+    	      logger.debug(s"tryWrite ${this.name} accepted $v")
+    	    case Retracted =>
+            // the client no longer wishes to put; no need to reschedule
+    	      logger.debug(s"tryWrite ${this.name} retracted $v")
+    	  }
       }
-      if(trigger) pReadyForRead.trySuccess(Unit)
-    }
 
 
       private[this] def tryRead(pClient: TentativePromise[CV[T]]): Unit = this.synchronized {
         logger.debug(s"tryRead $this $pClient")
-        var trigger = false
-        pClient.tryComplete(b.take.map {br =>
-          if(br.noLongerFull) {logger.debug(s"${this} nlf ${br.v}"); trigger = true}
-          if(br.nowEmpty)     {logger.debug(s"${this} ne ${br.v}");  pReadyForRead = ReadyPromise[CV[T],Unit]}
+        def processTakeResult(br: BufferSuccess[T]) : CV[T] = {
+          if(br.noLongerFull) pReadyForWrite.trySuccess(Unit)
+          if(br.nowEmpty)  pReadyForRead = ReadyPromise[CV[T],Unit]
+          logger.debug(s"tryRead $this $br")
           CV(this,br.v)
-        }) match {
-          case Retracted => {logger.debug(s"${this} dnc");pReadyForRead.future map {_ => tryRead(pClient)}}
-          case Accepted           => logger.debug(s"${this} rdc");
-          case Refused      => logger.debug(s"${this} rac");
         }
-        if(trigger) pReadyForWrite.trySuccess(Unit)
+        pClient.tryComplete(b.take.map(processTakeResult)) match {
+          case Refused => 
+            logger.debug(s"tryRead ${this.name} refused")
+            pReadyForRead.tryDeliver(pClient)(tryRead)
+            //pReadyForRead.future map {_ => tryRead(pClient)}
+          case Accepted  => 
+            logger.debug(s"tryRead ${this.name} accepted")
+          case Retracted =>
+            logger.debug(s"tryRead ${this.name} retracted")
+        }
       }
     
     
@@ -237,7 +249,7 @@ package core_async {
      */
     def write(v: T): Future[Unit] = this.synchronized {
       val p = TentativePromise[CV[T]]
-      logger.debug(s"$this write $v $p")
+      logger.debug(s"write $this $v $p")
       pReadyForWrite.tryDeliver(p)(tryWrite(v,_))
       p.future.map(_ => Unit)
     }
@@ -245,7 +257,7 @@ package core_async {
 
     def read: Future[T] = this.synchronized {
       val p = TentativePromise[CV[T]]
-      logger.debug(s"$this read $p")
+      logger.debug(s"read $this $p")
       pReadyForRead.tryDeliver(p)(tryRead(_))
       p.future.map(_.v)
     }
@@ -269,7 +281,7 @@ package core_async {
     def unary_~[T](c: Chan[T]) = c.read
     
     def apply[T](name: String) = new Chan[T](new NormalBuffer(1, false, false), name)
-    def apply[T] = new Chan[T](new NormalBuffer(1, false, false), UUID.randomUUID().toString())
+    def apply[T] = new Chan[T](new NormalBuffer(1, false, false), "timeout" + UUID.randomUUID().toString())
     def apply[T](n: Int) = new Chan[T](new NormalBuffer(n, false, false), UUID.randomUUID.toString())
     def timeout[T](d: Duration, v: T, name: String): Chan[T] = {
       val c = Chan[T](name)
@@ -277,7 +289,7 @@ package core_async {
       Timeout.timeout(d) flatMap {println("Timeout fired"); _ => c.write(v) }
       c
     }
-    def timeout[T](d: Duration, v: T): Chan[T] = timeout[T](d, v, UUID.randomUUID.toString())
+    def timeout[T](d: Duration, v: T): Chan[T] = timeout[T](d, v, v.toString)
     def timeout(d: Duration): Chan[Unit] = timeout(d, Unit)
     
     type Pretender
