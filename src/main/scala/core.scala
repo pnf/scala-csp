@@ -14,7 +14,6 @@ package core_async {
 
   object Timeout {
     val timer = new Timer()
-    def timeout(d: Duration): Future[Unit] = timeout(d.toMillis)
     def timeout(d: Long): Future[Unit] = {
       val p = Promise[Unit]()
       val f = p.future
@@ -201,9 +200,10 @@ package core_async {
       // Only reschedule if we failed to write to the buffer, not if the promise was already completed.
       private[this] def tryWrite(v: T, pClient: TentativePromise[CV[T]]) : Unit = this.synchronized {
     	  logger.debug(s"tryWrite $this $v $pClient")
+        var trigger = false
     	  def processPutResult(br: BufferSuccess[T]) : CV[T] = {
           if (br.nowFull)  pReadyForWrite = ReadyPromise[CV[T],Unit]
-    		  if (br.noLongerEmpty) pReadyForRead.trySuccess(Unit)
+    		  if (br.noLongerEmpty) trigger = true // pReadyForRead.trySuccess(Unit)
           logger.debug(s"tryWrite ${this} $br")
     		  CV(this,v)
     	  }
@@ -219,13 +219,15 @@ package core_async {
             // the client no longer wishes to put; no need to reschedule
     	      logger.debug(s"tryWrite ${this.name} retracted $v")
     	  }
+        if(trigger) pReadyForRead.trySuccess(Unit)
       }
 
 
       private[this] def tryRead(pClient: TentativePromise[CV[T]]): Unit = this.synchronized {
         logger.debug(s"tryRead $this $pClient")
+        var trigger = false
         def processTakeResult(br: BufferSuccess[T]) : CV[T] = {
-          if(br.noLongerFull) pReadyForWrite.trySuccess(Unit)
+          if(br.noLongerFull) trigger = true // pReadyForWrite.trySuccess(Unit)
           if(br.nowEmpty)  pReadyForRead = ReadyPromise[CV[T],Unit]
           logger.debug(s"tryRead $this $br")
           CV(this,br.v)
@@ -240,6 +242,7 @@ package core_async {
           case Retracted =>
             logger.debug(s"tryRead ${this.name} retracted")
         }
+        if(trigger) pReadyForWrite.trySuccess(Unit)
       }
     
     
@@ -279,18 +282,18 @@ package core_async {
   object Chan extends LazyLogging {
     
     def unary_~[T](c: Chan[T]) = c.read
-    
+    implicit def toFuture[T](c:Chan[T]) : Future[T]= c.read    
     def apply[T](name: String) = new Chan[T](new NormalBuffer(1, false, false), name)
-    def apply[T] = new Chan[T](new NormalBuffer(1, false, false), "timeout" + UUID.randomUUID().toString())
+    def apply[T] = new Chan[T](new NormalBuffer(1, false, false), UUID.randomUUID().toString())
     def apply[T](n: Int) = new Chan[T](new NormalBuffer(n, false, false), UUID.randomUUID.toString())
-    def timeout[T](d: Duration, v: T, name: String): Chan[T] = {
+    def timeout[T](d: Long, v: T, name: String): Chan[T] = {
       val c = Chan[T](name)
       logger.debug(s"Creating timeout channel ${d}")
       Timeout.timeout(d) flatMap {println("Timeout fired"); _ => c.write(v) }
       c
     }
-    def timeout[T](d: Duration, v: T): Chan[T] = timeout[T](d, v, v.toString)
-    def timeout(d: Duration): Chan[Unit] = timeout(d, Unit)
+    def timeout(m: Long, name: String) = timeout[String](m, name, name)
+    def timeout(m: Long) : Chan[Unit] = timeout[Unit](m,Unit,"timeout" + UUID.randomUUID.toString())
     
     type Pretender
 
