@@ -200,10 +200,9 @@ package core_async {
       // Only reschedule if we failed to write to the buffer, not if the promise was already completed.
       private[this] def tryWrite(v: T, pClient: TentativePromise[CV[T]]) : Unit = this.synchronized {
     	  logger.debug(s"tryWrite $this $v $pClient")
-        var trigger = false
     	  def processPutResult(br: BufferSuccess[T]) : CV[T] = {
           if (br.nowFull)  pReadyForWrite = ReadyPromise[CV[T],Unit]
-    		  if (br.noLongerEmpty) trigger = true // pReadyForRead.trySuccess(Unit)
+    		  if (br.noLongerEmpty) pReadyForRead.trySuccess(Unit) // must come second
           logger.debug(s"tryWrite ${this} $br")
     		  CV(this,v)
     	  }
@@ -219,16 +218,14 @@ package core_async {
             // the client no longer wishes to put; no need to reschedule
     	      logger.debug(s"tryWrite ${this.name} retracted $v")
     	  }
-        if(trigger) pReadyForRead.trySuccess(Unit)
       }
 
 
       private[this] def tryRead(pClient: TentativePromise[CV[T]]): Unit = this.synchronized {
         logger.debug(s"tryRead $this $pClient")
-        var trigger = false
         def processTakeResult(br: BufferSuccess[T]) : CV[T] = {
-          if(br.noLongerFull) trigger = true // pReadyForWrite.trySuccess(Unit)
           if(br.nowEmpty)  pReadyForRead = ReadyPromise[CV[T],Unit]
+          if(br.noLongerFull) pReadyForWrite.trySuccess(Unit) // must come second
           logger.debug(s"tryRead $this $br")
           CV(this,br.v)
         }
@@ -242,7 +239,6 @@ package core_async {
           case Retracted =>
             logger.debug(s"tryRead ${this.name} retracted")
         }
-        if(trigger) pReadyForWrite.trySuccess(Unit)
       }
     
     
