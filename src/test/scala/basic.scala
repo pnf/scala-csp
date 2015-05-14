@@ -55,7 +55,7 @@ class ListenAndRespond extends FlatSpec with TimeLimitedTests with LazyLogging {
 
 class Alts extends FlatSpec with TimeLimitedTests with LazyLogging{
   
-  val n = 1000
+  val n = 100000
   val t1 = 10
   val t2 = 15
   
@@ -93,15 +93,21 @@ class Alts extends FlatSpec with TimeLimitedTests with LazyLogging{
     var k = n
     var jPrev = 0L
     var iPrev = 0
+    var iTo = 0
+    var t = timeout(2)
     async {
       while(k>0) {
-        k = k - 1
         logger.debug("Running alts")
-        await(Chan.alts(c1, c2)) match {
-          case c1(i) => {logger.debug(s"Got $i");assert(i.isInstanceOf[Int]);  assert(i==iPrev+1); iPrev = i}
-          case c2(j) => {logger.debug(s"Got ${j}");assert(j.isInstanceOf[Long]);assert(j==jPrev+1); jPrev = j}
+        await(Chan.alts(c1, c2, t)) match {
+          case c1(i) => {logger.debug(s"Got $i");assert(i.isInstanceOf[Int]);  assert(i===iPrev+1); iPrev = i; k=k-1}
+          case c2(j) => {logger.debug(s"Got ${j}");assert(j.isInstanceOf[Long]);assert(j===jPrev+1); jPrev = j; k=k-1}
+          case to =>
+            logger.debug("Got timeout!")
+            iTo = iTo +1
+            t = timeout(2)  
         }
       }
+      logger.info(s"$iPrev $jPrev $iTo")
       assert(n === iPrev+jPrev)
       finished.success(Unit)
     }
@@ -109,29 +115,8 @@ class Alts extends FlatSpec with TimeLimitedTests with LazyLogging{
     Await.ready(finished.future,Duration.Inf)
     
 
-}
-
-
-
-object AsyncApp extends App {
-
-  import Chan._
-
-  
-
-
-  val f = Future {Thread.sleep(100);2}
-  val f2 = f.map {_+1}
-  val f3 = Future {Thread.sleep(1000); 3.14}
-  val f4 = async {await(f3).round == await(f2)}
-  async {
-    logger.debug(s"Flort ${await(f4)}")
   }
   
 
-
-  
-  Await.ready(Promise[Unit].future, Duration.Inf)
-}
 
 }

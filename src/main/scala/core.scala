@@ -185,7 +185,7 @@ package core_async {
     private [this] var pReadyForWrite =   ReadyPromise.successful[CV[T],Unit](Unit)
     private [this ] var pReadyForRead =   ReadyPromise[CV[T],Unit]
     
-
+    def unary_~[T] = read
 
     override def toString = s"Chan($b,$name) rfw=${pReadyForWrite.isCompleted} rfr=${pReadyForRead.isCompleted}"
     
@@ -277,7 +277,6 @@ package core_async {
   import java.util.UUID
   object Chan extends LazyLogging {
     
-    def unary_~[T](c: Chan[T]) = c.read
     implicit def toFuture[T](c:Chan[T]) : Future[T]= c.read    
     def apply[T](name: String) = new Chan[T](new NormalBuffer(1, false, false), name)
     def apply[T] = new Chan[T](new NormalBuffer(1, false, false), UUID.randomUUID().toString())
@@ -285,7 +284,7 @@ package core_async {
     def timeout[T](d: Long, v: T, name: String): Chan[T] = {
       val c = Chan[T](name)
       logger.debug(s"Creating timeout channel ${d}")
-      Timeout.timeout(d) flatMap {println("Timeout fired"); _ => c.write(v) }
+      Timeout.timeout(d) flatMap {logger.debug(s"Timeout $name fired"); _ => c.write(v) }
       c
     }
     def timeout(m: Long, name: String) = timeout[String](m, name, name)
