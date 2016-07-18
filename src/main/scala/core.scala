@@ -18,7 +18,7 @@ package core_async {
       val p = Promise[Unit]()
       val f = p.future
       val tt = new TimerTask() {
-        def run {
+        def run() {
           p.success(())
         }
       }
@@ -39,7 +39,7 @@ package core_async {
   /** Promise that might not be fulfilled.
     */
   class TentativePromise[T] {
-    val p = Promise[T]
+    val p = Promise[T]()
     def future: scala.concurrent.Future[T] = p.future
     /** A normal Promise.tryComplete might fail if the promise is already completed; this
      *  one can also fail because the lazy offer value returns None.
@@ -65,7 +65,7 @@ package core_async {
    */
   class ReadyPromise[T,U] extends Promise[U] {
     type TP = TentativePromise[T]
-	  val p = Promise[U]
+	  val p = Promise[U]()
 		val h: scala.collection.mutable.HashMap[TP, TP => Unit] = new scala.collection.mutable.HashMap()
 
     def future  = p.future
@@ -174,7 +174,7 @@ package core_async {
     def chan : Chan[T]
   }
   
-  case class CV[T](val c: Chan[T], val v: T) extends ChanHolder[T] {
+  case class CV[T](c: Chan[T], v: T) extends ChanHolder[T] {
     def chan = c
   }
 
@@ -185,7 +185,7 @@ package core_async {
     private [this] var pReadyForWrite =   ReadyPromise.successful[CV[T],Unit](Unit)
     private [this ] var pReadyForRead =   ReadyPromise[CV[T],Unit]
     
-    def unary_~[T] = read
+    def unary_~ = read
 
     override def toString = s"Chan($b,$name) rfw=${pReadyForWrite.isCompleted} rfr=${pReadyForRead.isCompleted}"
     
@@ -290,7 +290,7 @@ package core_async {
     def timeout(m: Long, name: String) = timeout[String](m, name, name)
     def timeout(m: Long) : Chan[Unit] = timeout[Unit](m,Unit,"timeout" + UUID.randomUUID.toString())
     
-    type Pretender
+    class Pretender
 
     def alts(cs: ChanHolder[Pretender]*): Future[CV[Pretender]] = {
       val p = TentativePromise[CV[Pretender]]
