@@ -26,16 +26,16 @@ package core_async {
       f
     }
   }
-  
+
   object TentativeOfferResult extends Enumeration {
     type TentativeOfferResult = Value
-    val Retracted,    // The promise had already been completed by someone else 
+    val Retracted,    // The promise had already been completed by someone else
         Accepted,     // Our offer succeeded; we completed the promise.
         Refused =     // Our offer failed; promise is still uncompleted.
           Value
   }
   import TentativeOfferResult._
-  
+
   /** Promise that might not be fulfilled.
     */
   class TentativePromise[T] {
@@ -59,7 +59,7 @@ package core_async {
    object TentativePromise {
     def apply[T] =    new TentativePromise[T]
    }
-  
+
 
   /** Promise that fulfills tentative promises.
    */
@@ -70,7 +70,7 @@ package core_async {
 
     def future  = p.future
     def isCompleted: Boolean = p.isCompleted
-    
+
     def tryComplete(result: scala.util.Try[U]): Boolean = this.synchronized {
        val ret = if(p.tryComplete(result)) {  // fires any standard listeners
           // Notify all clients.  Some of the deliveries might fail.
@@ -81,7 +81,7 @@ package core_async {
        ret
     }
 
-    /** 
+    /**
      * When this ReadyPromise is complete, attempt to complete
      * the TentativePromise pDeliver by passing it to f.
      */
@@ -96,35 +96,35 @@ package core_async {
   }
 
   object ReadyPromise {
-    def apply[T,U] =         new ReadyPromise[T,U]() 
+    def apply[T,U] =         new ReadyPromise[T,U]()
     def successful[T,U](u:U) : ReadyPromise[T,U] = {
       val p = new ReadyPromise[T,U]()
       p.trySuccess(u)
       p
     }
   }
-  
+
   case class BufferSuccess[T](v : T,
         noLongerEmpty:Boolean=false,
         noLongerFull:Boolean=false,
         nowEmpty:Boolean=false,
         nowFull:Boolean=false)
-  
-  
+
+
   // The only thing exciting about a ChanBuffer is that you pass its put/take methods
   // a promise to fulfill should that operation render the buffer no longer empty/full.
   abstract class ChanBuffer[T]() {
     def put(v: T) : Option[BufferSuccess[T]]
     def take : Option[BufferSuccess[T]]
   }
-  
+
 
 
   class NormalBuffer[T](n: Int, dropping: Boolean, sliding: Boolean) extends ChanBuffer[T] {
     val b = scala.collection.mutable.Buffer.empty[T]
-    
+
     override def toString = s"NormalBuffer($n, $dropping, $sliding, $b"
-    
+
     def put(v:T) : Option[BufferSuccess[T]] = this.synchronized {
       val s = b.size
       var noLongerEmpty = false
@@ -167,28 +167,28 @@ package core_async {
       }
     }
   }
-  
 
-  
+
+
   sealed trait ChanHolder[T] {
     def chan : Chan[T]
   }
-  
+
   case class CV[T](c: Chan[T], v: T) extends ChanHolder[T] {
     def chan = c
   }
 
   class Chan[T](val b: ChanBuffer[T], val name: String) extends ChanHolder[T] with LazyLogging {
-    
+
     def chan = this
 
     private [this] var pReadyForWrite =   ReadyPromise.successful[CV[T],Unit](Unit)
     private [this ] var pReadyForRead =   ReadyPromise[CV[T],Unit]
-    
+
     def unary_~ = read
 
     override def toString = s"Chan($b,$name) rfw=${pReadyForWrite.isCompleted} rfr=${pReadyForRead.isCompleted}"
-    
+
     // Extract the value in a chan-value pair, properly cast.  Note we explicitly match
     // CV[Chan.Pretender], because Chan is invariant.
     def unapply(cv: CV[Chan.Pretender]): Option[T] =
@@ -230,21 +230,21 @@ package core_async {
           CV(this,br.v)
         }
         pClient.tryComplete(b.take.map(processTakeResult)) match {
-          case Refused => 
+          case Refused =>
             logger.debug(s"tryRead ${this.name} refused")
             pReadyForRead.tryDeliver(pClient)(tryRead)
             //pReadyForRead.future map {_ => tryRead(pClient)}
-          case Accepted  => 
+          case Accepted  =>
             logger.debug(s"tryRead ${this.name} accepted")
           case Retracted =>
             logger.debug(s"tryRead ${this.name} retracted")
         }
       }
-    
-    
 
 
-    /** Return a future that completes on successful write to the channel. 
+
+
+    /** Return a future that completes on successful write to the channel.
      */
     def write(v: T): Future[Unit] = this.synchronized {
       val p = TentativePromise[CV[T]]
@@ -261,7 +261,7 @@ package core_async {
       p.future.map(_.v)
     }
 
-    
+
     def read(pNotify: TentativePromise[CV[T]]): Unit = this.synchronized {
       logger.debug(s"$this read $pNotify")
      pReadyForRead.tryDeliver(pNotify)(tryRead(_))}
@@ -269,15 +269,15 @@ package core_async {
     def write(v: T, pNotify: TentativePromise[CV[T]] ) : Unit = this.synchronized {
       logger.debug(s"$this write $pNotify")
       pReadyForWrite.tryDeliver(pNotify)(tryWrite(v,_))}
-      
+
   }
 
-  
+
 
   import java.util.UUID
   object Chan extends LazyLogging {
-    
-    implicit def toFuture[T](c:Chan[T]) : Future[T]= c.read    
+
+    implicit def toFuture[T](c:Chan[T]) : Future[T]= c.read
     def apply[T](name: String) = new Chan[T](new NormalBuffer(1, false, false), name)
     def apply[T] = new Chan[T](new NormalBuffer(1, false, false), UUID.randomUUID().toString())
     def apply[T](n: Int) = new Chan[T](new NormalBuffer(n, false, false), UUID.randomUUID.toString())
@@ -289,7 +289,7 @@ package core_async {
     }
     def timeout(m: Long, name: String) = timeout[String](m, name, name)
     def timeout(m: Long) : Chan[Unit] = timeout[Unit](m,Unit,"timeout" + UUID.randomUUID.toString())
-    
+
     class Pretender
 
     def alts(cs: ChanHolder[Pretender]*): Future[CV[Pretender]] = {
@@ -308,5 +308,3 @@ package core_async {
 
   }
 }
-
-

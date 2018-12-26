@@ -15,5 +15,7 @@ project/plugins/project/
 *~
 .idea*
 .ensime*
+.bloop
+.metals
 .project
 .classpath
